@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -16,6 +17,14 @@ type FlowLog struct {
 	DstPort  string
 	Protocol string
 	Tag      string
+}
+
+// IANAProtocolMap maps IANA protocol numbers to their corresponding names
+var IANAProtocolMap = map[int]string{
+	6:  "tcp",  // TCP
+	17: "udp",  // UDP
+	1:  "icmp", // ICMP
+	// Add more protocols if needed
 }
 
 // ParseLookupTable reads the lookup CSV file and returns a LookupTable
@@ -38,36 +47,34 @@ func ParseLookupTable(filePath string) (LookupTable, error) {
 		if err != nil {
 			break
 		}
-		key := fmt.Sprintf("%s_%s", record[0], strings.ToLower(record[1]))
-		lookupTable[key] = record[2]
+		port := strings.TrimSpace(record[0])
+		protocol := strings.TrimSpace(strings.ToLower(record[1]))
+		tag := strings.TrimSpace(record[2])
+
+		key := fmt.Sprintf("%s_%s", port, protocol)
+		lookupTable[key] = tag
 	}
 
 	return lookupTable, nil
 }
 
 // ParseFlowLog parses a flow log line into a FlowLog struct
-func ParseFlowLog(line string, lookupTable LookupTable) FlowLog {
+func ParseFlowLog(line string, lookupTable LookupTable) (FlowLog, error) {
 	fields := strings.Fields(line)
 	if len(fields) < 14 {
-		return FlowLog{}
+		return FlowLog{}, nil
 	}
 
 	dstPort := fields[5]
-	protocolNum := fields[7]
-
-	// Map protocol number to protocol name
-	var protocol string
-	switch protocolNum {
-	case "6":
-		protocol = "tcp"
-	case "17":
-		protocol = "udp"
-	case "1":
-		protocol = "icmp"
-	default:
-		protocol = "unknown"
+	protocolNum, err := strconv.Atoi(fields[7])
+	if err != nil {
+		return FlowLog{}, err
 	}
-
+	// Map protocol number to protocol name
+	protocol := "unknown"
+	if protocolStr, exists := IANAProtocolMap[protocolNum]; exists {
+		protocol = protocolStr
+	}
 	// Find tag in lookup table
 	key := fmt.Sprintf("%s_%s", dstPort, protocol)
 	tag, exists := lookupTable[key]
@@ -79,7 +86,7 @@ func ParseFlowLog(line string, lookupTable LookupTable) FlowLog {
 		DstPort:  dstPort,
 		Protocol: protocol,
 		Tag:      tag,
-	}
+	}, nil
 }
 
 // CountTags counts the occurrences of each tag
@@ -100,36 +107,106 @@ func CountPortProtocol(flowLogs []FlowLog) map[string]int {
 	}
 	return portProtocolCount
 }
-
-// PrintTagCounts prints the tag count results
-func PrintTagCounts(tagCount map[string]int) {
-	fmt.Println("Tag Counts:")
-	fmt.Println("Tag,Count")
-	for tag, count := range tagCount {
-		fmt.Printf("%s,%d\n", tag, count)
+func WriteOutput(filePath string,
+	tagCount map[string]int,
+	portProtocolCount map[string]int) error {
+	// Create or open the file
+	file, err := os.Create(filePath)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return err
 	}
+	defer file.Close()
+
+	// Create a new CSV writer
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	if err := WriteTagCounts(tagCount, writer); err != nil {
+		return err
+	}
+	if err := WritePortProtocolCounts(portProtocolCount, writer); err != nil {
+		return err
+	}
+	return nil
 }
 
-// PrintPortProtocolCounts prints the port/protocol combination counts
-func PrintPortProtocolCounts(portProtocolCount map[string]int) {
-	fmt.Println("\nPort/Protocol Combination Counts:")
-	fmt.Println("Port,Protocol,Count")
+// WriteTagCounts writes the tag count results
+func WriteTagCounts(tagCount map[string]int, writer *csv.Writer) error {
+	title := []string{"Tag Counts:"}
+	err := writer.Write(title)
+	if err != nil {
+		fmt.Println("Error writing title:", err)
+		return err
+	}
+
+	header := []string{"Tag", "Count"}
+	err = writer.Write(header)
+	if err != nil {
+		fmt.Println("Error writing header:", err)
+		return err
+	}
+
+	for tag, count := range tagCount {
+		row := []string{tag, strconv.Itoa(count)}
+		err = writer.Write(row)
+		if err != nil {
+			fmt.Println("Error writing row:", err)
+			return err
+		}
+	}
+	return nil
+}
+
+// WritePortProtocolCounts prints the port/protocol combination counts
+func WritePortProtocolCounts(portProtocolCount map[string]int,
+	writer *csv.Writer) error {
+	title := []string{"Port/Protocol Combination Counts:"}
+	err := writer.Write(title)
+	if err != nil {
+		fmt.Println("Error writing title:", err)
+		return err
+	}
+	header := []string{"Port", "Protocol", "Count"}
+	err = writer.Write(header)
+	if err != nil {
+		fmt.Println("Error writing header:", err)
+		return err
+	}
+
 	for key, count := range portProtocolCount {
 		parts := strings.Split(key, "_")
-		fmt.Printf("%s,%s,%d\n", parts[0], parts[1], count)
+		row := []string{parts[0], parts[1], strconv.Itoa(count)}
+		err = writer.Write(row)
+		if err != nil {
+			fmt.Println("Error writing row:", err)
+			return err
+		}
 	}
+	return nil
 }
 
 func main() {
+	// Ensure that exactly 3 arguments are passed (two inputs and one output file)
+	if len(os.Args) != 4 {
+		fmt.Println("Usage: go run main.go <path_to_lookup_table> <path_to_flow_log_file> <output file>")
+		return
+	}
+
+	// Get command-line arguments
+	path_to_lookup_table := os.Args[1]
+	path_to_flow_log_file := os.Args[2]
+	outputFile := os.Args[3]
+
 	// Load lookup table
-	lookupTable, err := ParseLookupTable("input_lookup_table.csv")
+	lookupTable, err := ParseLookupTable(path_to_lookup_table)
 	if err != nil {
 		fmt.Println("Error reading lookup table:", err)
 		return
 	}
 
 	// Open the flow log file
-	file, err := os.Open("input_flow_logs.txt")
+	file, err := os.Open(path_to_flow_log_file)
 	if err != nil {
 		fmt.Println("Error reading flow log:", err)
 		return
@@ -141,7 +218,11 @@ func main() {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
-		flowLog := ParseFlowLog(line, lookupTable)
+		flowLog, err := ParseFlowLog(line, lookupTable)
+		if err != nil {
+			fmt.Println("Error parsing flow log:", err.Error())
+			continue
+		}
 		if flowLog.DstPort != "" {
 			flowLogs = append(flowLogs, flowLog)
 		}
@@ -154,8 +235,6 @@ func main() {
 	// Count tags and port/protocol combinations
 	tagCount := CountTags(flowLogs)
 	portProtocolCount := CountPortProtocol(flowLogs)
-
-	// Print results
-	PrintTagCounts(tagCount)
-	PrintPortProtocolCounts(portProtocolCount)
+	// Write output to output file
+	WriteOutput(outputFile, tagCount, portProtocolCount)
 }
